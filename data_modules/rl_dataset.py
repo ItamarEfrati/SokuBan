@@ -72,7 +72,8 @@ class RLDataset(IterableDataset):
         self.sample_size = sample_size
         self.transform = T.Compose([
             T.ToTensor(),
-            T.Grayscale()
+            T.Grayscale(),
+            T.CenterCrop(80)
         ])
 
     def __iter__(self) -> Iterator[Tuple]:

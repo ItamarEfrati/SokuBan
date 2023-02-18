@@ -1,11 +1,9 @@
 import random
 
-import matplotlib.pyplot as plt
-
 import pickle
 
 from data_modules.rl_dataset import Experience
-from soko_pap import PushAndPullSokobanEnv
+from env.soko_pap import PushAndPullSokobanEnv
 
 
 def play_step(env, state):
