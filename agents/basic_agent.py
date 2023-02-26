@@ -1,4 +1,5 @@
 import pickle
+import random
 from abc import ABC, abstractmethod
 from typing import Tuple, OrderedDict
 
@@ -7,10 +8,9 @@ import pytorch_lightning as pl
 import torch
 from pytorch_lightning import LightningModule
 from torch import nn, Tensor
-from torch.optim import Adam
 from torch.utils.data import DataLoader
 
-from data_modules.rl_dataset import ReplayBuffer, RLDataset, Experience
+from env.soko_pap import PushAndPullSokobanEnv
 
 
 class Agent(LightningModule, ABC):
@@ -18,29 +18,18 @@ class Agent(LightningModule, ABC):
 
     def __init__(
             self,
-            train_env,
-            val_env,
             seed,
-            batch_size: int = 16,
             lr: float = 1e-3,
             gamma: float = 0.9,
-            replay_size: int = 10_000,
-            warm_start_size: int = 8000,
             eps_last_frame: int = 2000,
             eps_start: float = 1.0,
             eps_end: float = 0.01,
-            episode_length: int = 1000,
             val_every=5
     ) -> None:
         """
         Args:
-            batch_size: size of the batches")
             lr: learning rate
-            train_env: gym environment for training
-            val_env: gym environment for evaluation
             gamma: discount factor
-            replay_size: capacity of the replay buffer
-            warm_start_size: how many samples do we use to fill our buffer at the start of training
             eps_last_frame: what frame should epsilon stop decaying
             eps_start: starting value of epsilon
             eps_end: final value of epsilon
@@ -48,25 +37,22 @@ class Agent(LightningModule, ABC):
             # warm_start_steps: max episode reward in the environment
         """
         super().__init__()
-        self.train_env = train_env
-        self.val_env = val_env
         self.seed = seed
         self.state = None
-        self.state = self.reset(self.train_env)
-        self.reset(self.val_env)
-
-        self.buffer = ReplayBuffer(self.hparams.replay_size)
-        self.total_reward = 0
+        self.train_env = self.reset()
+        self.state = self.train_env.render(mode='rgb_array')
+        self.total_reward = -50
         self.episode_reward = 0
-        self.dataset = RLDataset(self.buffer, sample_size=self.hparams.episode_length)
 
     # region Agent
 
-    def reset(self, env):
+    def reset(self):
         """Resents the environment and updates the state."""
         if self.seed is not None:
-            pl.seed_everything(self.seed)
-        return env.reset()
+            # pl.seed_everything(self.seed)
+            random.seed(self.seed)
+        env = PushAndPullSokobanEnv(dim_room=(7, 7), num_boxes=1, max_steps=500)
+        return env
 
     @abstractmethod
     def get_action(self, env, state, net: nn.Module, epsilon: float, device: str) -> int:
@@ -83,11 +69,12 @@ class Agent(LightningModule, ABC):
             self,
             env,
             state,
+            policy: nn.Module,
             is_train=True,
             epsilon: float = 0.0,
             device: str = "cuda",
 
-    ) -> Tuple[float, bool, float]:
+    ) -> Tuple[float, bool, float, torch.tensor]:
         """Carries out a single interaction step between the agent and the environment.
 
         Args:
@@ -101,13 +88,7 @@ class Agent(LightningModule, ABC):
         pass
 
     @abstractmethod
-    def populate(self) -> None:
-        """Carries out several random steps through the environment to initially fill up the replay buffer with
-        experiences.
-
-        Args:
-            steps: number of random steps to populate the buffer with
-        """
+    def calculate_loss(self, batch):
         pass
 
     def get_epsilon(self, start: int, end: int, frames: int) -> float:
@@ -119,17 +100,12 @@ class Agent(LightningModule, ABC):
 
     # region Lightning
 
-    def configure_optimizers(self):
-        """Initialize Adam optimizer."""
-        optimizer = Adam(self.policy_net.parameters(), lr=self.hparams.lr)
-        return optimizer
-
     def __dataloader(self) -> DataLoader:
         """Initialize the Replay Buffer dataset used for retrieving experiences."""
         dataloader = DataLoader(
             dataset=self.dataset,
             batch_size=self.hparams.batch_size,
-            num_workers=1
+            num_workers=4
         )
         return dataloader
 
@@ -137,9 +113,9 @@ class Agent(LightningModule, ABC):
         """Get train loader."""
         return self.__dataloader()
 
-    def on_train_epoch_end(self) -> None:
+    def on_train_epoch_start(self) -> None:
         if self.current_epoch % self.hparams.val_every == 0:
-            states, total_reward = self.play_single_game()
+            states, total_reward, q_values_t = self.play_single_game()
             video = torch.tensor(np.stack(states).transpose(0, 3, 1, 2)).unsqueeze(0)
             self.logger.experiment.add_video(f'single game', video, self.global_step)
 
